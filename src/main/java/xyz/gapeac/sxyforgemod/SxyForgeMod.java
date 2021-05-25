@@ -94,8 +94,8 @@ public class SxyForgeMod
         {
             LOGGER.debug("Encode uuid life pair");
 
-            buffer.writeUUID(data.getKey());
-            buffer.writeInt(data.getValue());
+            buffer.writeUUID(data.getFirst());
+            buffer.writeInt(data.getSecond());
         }, packetBuffer ->
                 {
                     UUID id = packetBuffer.readUUID();
@@ -107,8 +107,8 @@ public class SxyForgeMod
                 {
                     if (supplier.get().getDirection().getReceptionSide().isClient())
                     {
-                        LOGGER.info("Received new life map for " + msg.getKey() + " with " + msg.getValue() + " lives");
-                        playerLivesCount.put(msg.getKey(), msg.getValue());
+                        LOGGER.info("Received new life map for " + msg.getFirst() + " with " + msg.getSecond() + " lives");
+                        playerLivesCount.put(msg.getFirst(), msg.getSecond());
                     }
                 });
     }

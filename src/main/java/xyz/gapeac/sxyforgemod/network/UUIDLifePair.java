@@ -1,6 +1,6 @@
 package xyz.gapeac.sxyforgemod.network;
 
-import javafx.util.Pair;
+import com.mojang.datafixers.util.Pair;
 
 import java.nio.ByteBuffer;
 import java.util.UUID;
