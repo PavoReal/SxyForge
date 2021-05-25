@@ -1,23 +1,30 @@
 package xyz.gapeac.sxyforgemod;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.type.MapType;
+import com.fasterxml.jackson.databind.type.TypeFactory;
+
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.network.play.ClientPlayNetHandler;
 import net.minecraft.client.network.play.NetworkPlayerInfo;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.ResourceLocation;
 import net.minecraft.util.text.StringTextComponent;
 import net.minecraft.util.text.TextFormatting;
 import net.minecraft.world.GameType;
+
 import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.api.distmarker.OnlyIn;
 import net.minecraftforge.client.event.RenderGameOverlayEvent;
 import net.minecraftforge.client.event.RenderPlayerEvent;
 import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.living.LivingDeathEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.fml.ExtensionPoint;
+import net.minecraftforge.fml.LogicalSide;
 import net.minecraftforge.fml.ModLoadingContext;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent;
@@ -30,25 +37,26 @@ import net.minecraftforge.fml.network.FMLNetworkConstants;
 import net.minecraftforge.fml.network.NetworkRegistry;
 import net.minecraftforge.fml.network.PacketDistributor;
 import net.minecraftforge.fml.network.simple.SimpleChannel;
+
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
+import xyz.gapeac.sxyforgemod.network.UUIDLifePair;
 
 import java.io.*;
-import java.nio.ByteBuffer;
-import java.util.HashMap;
-import java.util.UUID;
+import java.util.*;
 
 @Mod("sxyforgemod")
 public class SxyForgeMod
 {
-    // Directly reference a log4j logger.
-    private static final Logger LOGGER = LogManager.getLogger();
+    public static final Logger LOGGER = LogManager.getLogger();
 
-    public HashMap<UUID, Integer> playerLivesCount;
+    public Map<UUID, Integer> playerLivesCount;
 
     final String DATA_DIR = "./sxyforge/";
-    final String LIVES_BIN_PATH = DATA_DIR + "lives.bin";
+    final String LIVES_BIN_PATH = DATA_DIR + "lives.json";
 
     private static final String PROTOCOL_VERSION = "1";
     public static final SimpleChannel INSTANCE = NetworkRegistry.newSimpleChannel(
@@ -60,6 +68,8 @@ public class SxyForgeMod
 
     int packetIndex;
 
+    ObjectMapper objectMapper;
+
     public SxyForgeMod()
     {
         FMLJavaModLoadingContext.get().getModEventBus().addListener(this::clientSetup);
@@ -67,7 +77,6 @@ public class SxyForgeMod
 
         FMLJavaModLoadingContext.get().getModEventBus().addListener(this::commonSetup);
 
-        // Register ourselves for server and other game events we are interested in
         MinecraftForge.EVENT_BUS.register(this);
 
         ModLoadingContext.get().registerExtensionPoint(ExtensionPoint.DISPLAYTEST, () -> Pair.of(() -> FMLNetworkConstants.IGNORESERVERONLY, (a, b) -> true));
@@ -75,8 +84,11 @@ public class SxyForgeMod
 
     private void commonSetup(FMLCommonSetupEvent event)
     {
+        objectMapper = new ObjectMapper();
+
         LOGGER.info("SxyForgeMod presents, slow ass loading by the ForgeTM team");
 
+        // Register life pair packet
         packetIndex = 0;
         INSTANCE.registerMessage(packetIndex++, UUIDLifePair.class, (data, buffer) ->
         {
@@ -95,46 +107,137 @@ public class SxyForgeMod
                 {
                     if (supplier.get().getDirection().getReceptionSide().isClient())
                     {
-                        LOGGER.info("Received new life map");
-
-                        if (msg != null)
-                        {
-                            playerLivesCount.put(msg.getKey(), msg.getValue());
-                        }
-                        else
-                        {
-                            LOGGER.error("Got invalid player lives count");
-                        }
+                        LOGGER.info("Received new life map for " + msg.getKey() + " with " + msg.getValue() + " lives");
+                        playerLivesCount.put(msg.getKey(), msg.getValue());
                     }
                 });
+    }
+
+    private void saveLiveLife()
+    {
+        Mono.create(callback -> {
+            try
+            {
+                objectMapper.writeValue(new File(LIVES_BIN_PATH), playerLivesCount);
+
+                LOGGER.info("Saved life file to " + LIVES_BIN_PATH);
+            } catch (IOException e)
+            {
+                e.printStackTrace();
+                LOGGER.error("Could not write lives file");
+            }
+        }).subscribeOn(Schedulers.boundedElastic()).subscribe();
     }
 
     private void serverSetup(FMLDedicatedServerSetupEvent event)
     {
         LOGGER.info("SxyForgeMod Starting, data dir is " + DATA_DIR);
-        new File(DATA_DIR).mkdir();
+        if (new File(DATA_DIR).mkdir())
+        {
+            LOGGER.debug("Created data dir");
+        }
+        else
+        {
+            LOGGER.debug("Data dir exists");
+        }
+
+        TypeFactory typeFactory = objectMapper.getTypeFactory();
+        MapType mapType = typeFactory.constructMapType(HashMap.class, UUID.class, Integer.class);
 
         try
         {
-            FileInputStream lifeFile = new FileInputStream(LIVES_BIN_PATH);
-            ObjectInputStream in     = new ObjectInputStream(lifeFile);
-            ObjectInput input        = new ObjectInputStream(in);
-
-            playerLivesCount = (HashMap<UUID, Integer>) input.readObject();
-
-            LOGGER.info("Read existing life file");
-        }
-        catch (IOException | ClassNotFoundException e)
+            playerLivesCount = objectMapper.readValue(new File(LIVES_BIN_PATH), mapType);
+            LOGGER.info("Read existing lives file");
+        } catch (IOException e)
         {
-            LOGGER.info("Reset life file");
+            e.printStackTrace();
+
+            LOGGER.error(e.getMessage());
+            LOGGER.error("Could not read lives file, creating new map...");
+
             playerLivesCount = new HashMap<>();
         }
     }
 
-    private void clientSetup(final FMLClientSetupEvent event)
+    public Enum<TextFormatting> getPlayerColor(UUID playerID)
     {
-        LOGGER.info("The SxyForge mod says hello");
+        Enum<TextFormatting> result = TextFormatting.WHITE;
+
+        if (playerLivesCount != null)
+        {
+            Integer lives = playerLivesCount.get(playerID);
+
+            if (lives != null)
+            {
+                switch (lives)
+                {
+                    default:
+                    case 0:
+                    {
+                        result = TextFormatting.GRAY;
+                    } break;
+
+                    case 1:
+                    {
+                        result =  TextFormatting.RED;
+                    } break;
+
+                    case 2:
+                    {
+                        result = TextFormatting.YELLOW;
+                    } break;
+
+                    case 3:
+                    {
+                        result = TextFormatting.GREEN;
+                    } break;
+                }
+            }
+        }
+
+        return result;
+    }
+
+    @SubscribeEvent
+    @OnlyIn(Dist.CLIENT)
+    public void renderOverlayPre(RenderGameOverlayEvent.Pre event)
+    {
+        if (event.getType() == RenderGameOverlayEvent.ElementType.CHAT || event.getType() == RenderGameOverlayEvent.ElementType.PLAYER_LIST)
+        {
+            try
+            {
+                ClientPlayNetHandler clientPlayNetHandler = Minecraft.getInstance().getConnection();
+
+                if (clientPlayNetHandler != null)
+                {
+                    clientPlayNetHandler.getOnlinePlayers().forEach(player ->
+                    {
+                        try
+                        {
+                            player.setTabListDisplayName(new StringTextComponent(getPlayerColor(player.getProfile().getId()) + Objects.requireNonNull(player.getTabListDisplayName()).getString()));
+                        }
+                        catch (NullPointerException ignored) {}
+                    });
+
+                }
+            }
+            catch (NullPointerException e)
+            {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    public void clientSetup(final FMLClientSetupEvent event)
+    {
+        LOGGER.info("\"I'm here to kick gum and chew ass. And I'm all out of ass.\" - Dick Kickem");
         playerLivesCount = new HashMap<>();
+    }
+
+    @SubscribeEvent
+    public void onServerStopping(FMLServerStoppingEvent event)
+    {
+        saveLiveLife();
     }
 
     @SubscribeEvent
@@ -144,42 +247,7 @@ public class SxyForgeMod
 
         if (playerLivesCount != null && playerLivesCount.containsKey(player.getUUID()))
         {
-            switch (playerLivesCount.get(player.getUUID()))
-            {
-                case 1:
-                {
-                    nameFormatEvent.setDisplayname(new StringTextComponent(TextFormatting.RED + nameFormatEvent.getDisplayname().getString()));
-                } break;
-
-                case 2:
-                {
-                    nameFormatEvent.setDisplayname(new StringTextComponent(TextFormatting.YELLOW + nameFormatEvent.getDisplayname().getString()));
-                } break;
-
-                case 3:
-                {
-                    nameFormatEvent.setDisplayname(new StringTextComponent(TextFormatting.GREEN + nameFormatEvent.getDisplayname().getString()));
-                } break;
-            }
-        }
-    }
-
-    @SubscribeEvent
-    public void onServerStopping(FMLServerStoppingEvent event)
-    {
-        try
-        {
-            FileOutputStream lifeFile = new FileOutputStream(LIVES_BIN_PATH);
-            ObjectOutputStream out = new ObjectOutputStream(lifeFile);
-
-            out.writeObject(playerLivesCount);
-            out.close();
-            lifeFile.close();
-
-            LOGGER.info("Saved life file to " + LIVES_BIN_PATH);
-        } catch (IOException e)
-        {
-            e.printStackTrace();
+            nameFormatEvent.setDisplayname(new StringTextComponent(getPlayerColor(player.getUUID()) + nameFormatEvent.getDisplayname().getString()));
         }
     }
 
@@ -205,24 +273,28 @@ public class SxyForgeMod
 
             Integer lifeCount = playerLivesCount.get(player.getUUID());
 
-            lifeCount -= 1;
-            playerLivesCount.put(player.getUUID(), lifeCount);
-
             if (lifeCount > 0)
             {
-                player.sendMessage(new StringTextComponent(String.format("You have %s lives remaining", lifeCount)), player.getUUID());
-                LOGGER.info("Minus one life for " + player.getDisplayName().getString());
-            }
-            else
-            {
-                player.sendMessage(new StringTextComponent("You're out of lives! Setting your gamemode to spectator"), player.getUUID());
-                player.setGameMode(GameType.SPECTATOR);
+                lifeCount -= 1;
+                playerLivesCount.put(player.getUUID(), lifeCount);
 
-                LOGGER.info(player.getDisplayName().getString() + " has run out of lives!");
-            }
+                if (lifeCount > 0)
+                {
+                    player.sendMessage(new StringTextComponent(String.format("You have %s lives remaining", lifeCount)), player.getUUID());
+                    LOGGER.info("Minus one life for " + player.getDisplayName().getString());
+                }
+                else
+                {
+                    player.sendMessage(new StringTextComponent("You're out of lives! Setting your gamemode to spectator"), player.getUUID());
+                    player.setGameMode(GameType.SPECTATOR);
 
-            LOGGER.info("Sending new life pair to clients");
-            INSTANCE.send(PacketDistributor.ALL.noArg(), new UUIDLifePair(player.getUUID(), lifeCount));
+                    LOGGER.info(player.getDisplayName().getString() + " has run out of lives!");
+                }
+
+                LOGGER.info("Sending new life data clients");
+                playerLivesCount.forEach(((uuid, integer) -> INSTANCE.send(PacketDistributor.ALL.noArg(), new UUIDLifePair(uuid, integer))));
+                saveLiveLife();
+            }
         }
     }
 
@@ -231,16 +303,6 @@ public class SxyForgeMod
     public void renderPlayerPre(RenderPlayerEvent.Pre event)
     {
         event.getPlayer().refreshDisplayName();
-    }
-
-    @SubscribeEvent
-    @OnlyIn(Dist.CLIENT)
-    public void renderGameOverlayPre(RenderGameOverlayEvent.Pre event)
-    {
-        if (event.getType() == RenderGameOverlayEvent.ElementType.PLAYER_LIST)
-        {
-
-        }
     }
 
     @SubscribeEvent
@@ -273,6 +335,6 @@ public class SxyForgeMod
         }
 
         LOGGER.info("Sending new life pair to clients");
-        INSTANCE.send(PacketDistributor.ALL.noArg(), new UUIDLifePair(player.getUUID(), playerLivesCount.get(player.getUUID())));
+        playerLivesCount.forEach(((uuid, integer) -> INSTANCE.send(PacketDistributor.ALL.noArg(), new UUIDLifePair(uuid, integer))));
     }
 }
